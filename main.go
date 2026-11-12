@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"context-LLM/internal/config"
+	"context-LLM/internal/preview"
 	"context-LLM/internal/report"
 	"context-LLM/internal/runner"
 )
@@ -19,6 +20,7 @@ func main() {
 	configPath := flag.String("config", "", "Optional path to the benchmark configuration file")
 	dryRun := flag.Bool("dry-run", false, "Validate configuration without sending requests")
 	resume := flag.String("resume", "", "Resume from a run directory, or use 'latest'")
+	previewTarget := flag.String("preview", "", "Preview RESULTS.md; use 'latest' or a file path")
 	flag.Parse()
 
 	path := *configPath
@@ -28,6 +30,17 @@ func main() {
 		if err != nil {
 			fatal("resolve application directory: %v", err)
 		}
+	}
+
+	if *previewTarget != "" {
+		reportPath, err := preview.Resolve(*previewTarget, path)
+		if err != nil {
+			fatal("resolve report: %v", err)
+		}
+		if err := preview.Run(reportPath); err != nil {
+			fatal("preview report: %v", err)
+		}
+		return
 	}
 
 	cfg, err := config.Load(path, false)
@@ -121,10 +134,14 @@ func main() {
 	if len(deleted) > 0 {
 		fmt.Printf("Cleaned generated test files: %s\n", strings.Join(deleted, ", "))
 	}
-	fmt.Printf("Finished. Results:\n  English: %s\n  Chinese: %s\n",
-		filepath.Join(runRoot, "RESULTS.md"),
-		filepath.Join(runRoot, "RESULTS.zh-CN.md"),
-	)
+	resultsPath := filepath.Join(runRoot, "RESULTS.md")
+	fmt.Printf("Finished. Results: %s\n", resultsPath)
+	if cfg.PreviewAfterRun {
+		fmt.Println("Auto-preview is enabled.")
+		if err := preview.Run(resultsPath); err != nil {
+			fatal("preview report: %v", err)
+		}
+	}
 }
 
 func fatal(format string, values ...any) {

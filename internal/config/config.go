@@ -16,25 +16,28 @@ const HeadroomTokens = 12000
 const PlaceholderAPIKey = "sk-123456789"
 
 type Config struct {
-	BaseURL           string
-	Model             string
-	APIKey            string
-	APIMode           string
-	ReasoningEffort   string
-	ReasoningSummary  string
-	Tiers             []int
-	CharsPerToken     float64
-	MaxOutputTokens   int
-	Timeout           time.Duration
-	TransportRetries  int
-	AutoCalibrate     bool
-	EnhancedAutoTest  bool
-	StructuredOutput  bool
-	ParallelTests     bool
-	RequestIntervalMS int
-	AnchorCount       int
-	EvidenceTolerance int
-	TestModes         []string
+	BaseURL               string
+	Model                 string
+	APIKey                string
+	APIMode               string
+	ReasoningEffort       string
+	ReasoningSummary      string
+	Tiers                 []int
+	CharsPerToken         float64
+	MaxOutputTokens       int
+	Timeout               time.Duration
+	TransportRetries      int
+	AutoCalibrate         bool
+	EnhancedAutoTest      bool
+	BinaryPrecisionTokens int
+	StructuredOutput      bool
+	ParallelTests         bool
+	RequestIntervalMS     int
+	AnchorCount           int
+	EvidenceTolerance     int
+	TestModes             []string
+	ReportLanguage        string
+	PreviewAfterRun       bool
 }
 
 func DefaultPath() (string, error) {
@@ -136,6 +139,10 @@ func Load(path string, requireKey bool) (Config, error) {
 	if err != nil {
 		return Config{}, errors.New("enhanced_auto_test must be true or false")
 	}
+	binaryPrecisionTokens, err := strconv.Atoi(defaultString(bench["binary_precision_tokens"], "10000"))
+	if err != nil || binaryPrecisionTokens <= 0 {
+		return Config{}, errors.New("binary_precision_tokens must be a positive integer")
+	}
 	structuredOutput, err := strconv.ParseBool(defaultString(bench["structured_output"], "true"))
 	if err != nil {
 		return Config{}, errors.New("structured_output must be true or false")
@@ -160,27 +167,38 @@ func Load(path string, requireKey bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	reportLanguage := strings.ToLower(strings.TrimSpace(defaultString(bench["report_language"], "en")))
+	if reportLanguage != "en" && reportLanguage != "cn" {
+		return Config{}, errors.New("report_language must be en or cn")
+	}
+	previewAfterRun, err := strconv.ParseBool(defaultString(bench["preview_after_run"], "false"))
+	if err != nil {
+		return Config{}, errors.New("preview_after_run must be true or false")
+	}
 
 	return Config{
-		BaseURL:           strings.TrimRight(provider["base_url"], "/"),
-		Model:             provider["model"],
-		APIKey:            apiKey,
-		APIMode:           provider["api_mode"],
-		ReasoningEffort:   reasoningEffort,
-		ReasoningSummary:  reasoningSummary,
-		Tiers:             tiers,
-		CharsPerToken:     chars,
-		MaxOutputTokens:   maxOutput,
-		Timeout:           time.Duration(timeoutSeconds) * time.Second,
-		TransportRetries:  retries,
-		AutoCalibrate:     autoCalibrate,
-		EnhancedAutoTest:  enhancedAutoTest,
-		StructuredOutput:  structuredOutput,
-		ParallelTests:     parallelTests,
-		RequestIntervalMS: requestIntervalMS,
-		AnchorCount:       anchorCount,
-		EvidenceTolerance: evidenceTolerance,
-		TestModes:         testModes,
+		BaseURL:               strings.TrimRight(provider["base_url"], "/"),
+		Model:                 provider["model"],
+		APIKey:                apiKey,
+		APIMode:               provider["api_mode"],
+		ReasoningEffort:       reasoningEffort,
+		ReasoningSummary:      reasoningSummary,
+		Tiers:                 tiers,
+		CharsPerToken:         chars,
+		MaxOutputTokens:       maxOutput,
+		Timeout:               time.Duration(timeoutSeconds) * time.Second,
+		TransportRetries:      retries,
+		AutoCalibrate:         autoCalibrate,
+		EnhancedAutoTest:      enhancedAutoTest,
+		BinaryPrecisionTokens: binaryPrecisionTokens,
+		StructuredOutput:      structuredOutput,
+		ParallelTests:         parallelTests,
+		RequestIntervalMS:     requestIntervalMS,
+		AnchorCount:           anchorCount,
+		EvidenceTolerance:     evidenceTolerance,
+		TestModes:             testModes,
+		ReportLanguage:        reportLanguage,
+		PreviewAfterRun:       previewAfterRun,
 	}, nil
 }
 
@@ -189,46 +207,65 @@ func WriteDefault(path string) error {
 		return err
 	}
 	return writeText(path, `# context-LLM 配置
-# 修改后重新运行程序；# 后面的内容均为注释，不会参与解析。
+# 首次启动若缺少此文件，程序会在可执行文件同目录生成默认配置并退出。
+# 修改后重新运行程序；# 后面的内容是注释，不参与解析。
 
 # ============================================================
 # 服务商连接
 # ============================================================
 [provider]
-base_url = https://api.openai.com/v1       # OpenAI 兼容接口地址
-model = GPT6.1-Astra                       # 要测试的模型 ID
-api_key = sk-123456789                     # 占位符，正式测试前必须替换
-api_mode = chat-completions                # 可选：chat-completions / responses
-reasoning_effort = default                 # 可用：default（不发送）/ none / minimal / low / medium / high / xhigh / max
-reasoning_summary = default                # 仅 Responses：default（不发送）/ auto / concise / detailed
+base_url           = https://api.openai.com/v1 # OpenAI 兼容接口地址
+model              = GPT6.1-Astra             # 被测模型 ID
+api_key            = sk-123456789             # 占位密钥，正式测试前必须替换
+api_mode           = chat-completions          # 接口格式：chat-completions 或 responses
+
+# 思考等级；default 表示不发送该参数。
+# 可选：none / minimal / low / medium / high / xhigh / max
+reasoning_effort   = default                   # 推理强度；default 不修改请求参数
+
+# 仅 responses 生效；default 表示不发送该参数。
+# 可选：auto / concise / detailed
+reasoning_summary  = default                   # 回答摘要；default 不修改请求参数
 
 # ============================================================
 # 上下文与输出
 # ============================================================
 [benchmark]
-tiers = 200K, 400K, 600K, 800K, 1M         # 测试档位；支持 K、M 和小数，如 1.1M
-chars_per_token = 6.25                     # 初始输入估算，后续按实际用量校准
-max_output_tokens = 2500                   # 最小输出预算，程序会按锚点数自动扩展
-timeout_seconds = 900                      # 单次请求超时时间，单位：秒
-transport_retries = 1                      # 可恢复网络/HTTP 错误的额外重试次数
+# 测试档位；支持纯数字、K、M 和小数，如 1.1M
+tiers              = 200K, 400K, 600K, 800K, 1M # 待测上下文档位，必须递增且不重复
+
+chars_per_token    = 6.25   # 输入字符估算基准；运行报告会给出下次建议值
+max_output_tokens  = 2500   # 输出 token 最小预算，会按锚点数和完成状态扩展
+timeout_seconds    = 900    # 单次请求超时时间，单位：秒
+transport_retries  = 1      # 网络、429、5xx 等可恢复错误的额外重试次数
 
 # ============================================================
 # 自动测试
 # ============================================================
-auto_calibrate = true                      # 按实际输入 token 校准后续档位
-enhanced_auto_test = false                 # true：每档三次、中位数校准、自动二分
-structured_output = true                   # 优先启用 JSON 结构约束
-parallel_tests = false                     # true：并行执行增强模式的三次测试
-request_interval_ms = 0                    # 全局请求间隔，0 表示不限速
+auto_calibrate          = true  # 按实际输入 token 校准后续档位
+enhanced_auto_test      = false # true：每档三次新题、中位数校准并自动二分
+binary_precision_tokens = 10000 # 增强模式二分精度，单位：token，越小越精确
+structured_output       = true  # 发送 JSON 约束；供应商不支持时自动降级
+parallel_tests          = false # 仅增强模式：三次测试并行；关闭则串行
+request_interval_ms     = 0     # 全局请求起始间隔，单位：毫秒；0 表示不限速
 
 # ============================================================
 # 题目与评分
 # ============================================================
-anchor_count = 13                          # 总题目数，范围 13-50
-# 锚点越多，弱模型越容易漏答或返回异常 JSON。
-evidence_tolerance = 0                     # 每种题型允许的证据错误数；建议不超过 2
-test_modes = needle,multi_hop,conflict,adversarial
+# 总题目数，范围 13-50。锚点越多，弱模型越容易漏答或返回异常 JSON。
+anchor_count         = 13      # 题目总数；弱模型建议从默认值开始
+
+# 每种题型允许的证据错误数；建议不超过 2。
+evidence_tolerance   = 0       # 宽容的证据错误数；弱模型也不建议超过 2
+
 # 可用题型：needle / multi_hop / conflict / adversarial
+test_modes           = needle,multi_hop,conflict,adversarial # 逗号分隔，至少保留一种
+
+# RESULTS.md 输出语言：en（英文）或 cn（中文）
+report_language      = en      # 报告语言：en 或 cn
+
+# 测试完成后自动打开 RESULTS.md 预览；浏览器打开后最多运行 5 分钟
+preview_after_run    = false   # true：测试结束后启动本地报告预览
 `)
 }
 

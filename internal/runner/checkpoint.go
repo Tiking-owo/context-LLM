@@ -31,41 +31,47 @@ type Checkpoint struct {
 
 func ConfigSignature(cfg config.Config) string {
 	snapshot := struct {
-		BaseURL           string   `json:"base_url"`
-		Model             string   `json:"model"`
-		APIMode           string   `json:"api_mode"`
-		ReasoningEffort   string   `json:"reasoning_effort"`
-		ReasoningSummary  string   `json:"reasoning_summary"`
-		Tiers             []int    `json:"tiers"`
-		CharsPerToken     float64  `json:"chars_per_token"`
-		MaxOutputTokens   int      `json:"max_output_tokens"`
-		TimeoutSeconds    int      `json:"timeout_seconds"`
-		TransportRetries  int      `json:"transport_retries"`
-		AutoCalibrate     bool     `json:"auto_calibrate"`
-		EnhancedAutoTest  bool     `json:"enhanced_auto_test"`
-		ParallelTests     bool     `json:"parallel_tests"`
-		RequestIntervalMS int      `json:"request_interval_ms"`
-		AnchorCount       int      `json:"anchor_count"`
-		EvidenceTolerance int      `json:"evidence_tolerance"`
-		TestModes         []string `json:"test_modes"`
+		BaseURL               string   `json:"base_url"`
+		Model                 string   `json:"model"`
+		APIMode               string   `json:"api_mode"`
+		ReasoningEffort       string   `json:"reasoning_effort"`
+		ReasoningSummary      string   `json:"reasoning_summary"`
+		Tiers                 []int    `json:"tiers"`
+		CharsPerToken         float64  `json:"chars_per_token"`
+		MaxOutputTokens       int      `json:"max_output_tokens"`
+		TimeoutSeconds        int      `json:"timeout_seconds"`
+		TransportRetries      int      `json:"transport_retries"`
+		AutoCalibrate         bool     `json:"auto_calibrate"`
+		EnhancedAutoTest      bool     `json:"enhanced_auto_test"`
+		BinaryPrecisionTokens int      `json:"binary_precision_tokens"`
+		ParallelTests         bool     `json:"parallel_tests"`
+		RequestIntervalMS     int      `json:"request_interval_ms"`
+		AnchorCount           int      `json:"anchor_count"`
+		EvidenceTolerance     int      `json:"evidence_tolerance"`
+		TestModes             []string `json:"test_modes"`
+		ReportLanguage        string   `json:"report_language"`
+		PreviewAfterRun       bool     `json:"preview_after_run"`
 	}{
-		BaseURL:           cfg.BaseURL,
-		Model:             cfg.Model,
-		APIMode:           cfg.APIMode,
-		ReasoningEffort:   cfg.ReasoningEffort,
-		ReasoningSummary:  cfg.ReasoningSummary,
-		Tiers:             append([]int(nil), cfg.Tiers...),
-		CharsPerToken:     cfg.CharsPerToken,
-		MaxOutputTokens:   cfg.MaxOutputTokens,
-		TimeoutSeconds:    int(cfg.Timeout.Seconds()),
-		TransportRetries:  cfg.TransportRetries,
-		AutoCalibrate:     cfg.AutoCalibrate,
-		EnhancedAutoTest:  cfg.EnhancedAutoTest,
-		ParallelTests:     cfg.ParallelTests,
-		RequestIntervalMS: cfg.RequestIntervalMS,
-		AnchorCount:       cfg.AnchorCount,
-		EvidenceTolerance: cfg.EvidenceTolerance,
-		TestModes:         append([]string(nil), cfg.TestModes...),
+		BaseURL:               cfg.BaseURL,
+		Model:                 cfg.Model,
+		APIMode:               cfg.APIMode,
+		ReasoningEffort:       cfg.ReasoningEffort,
+		ReasoningSummary:      cfg.ReasoningSummary,
+		Tiers:                 append([]int(nil), cfg.Tiers...),
+		CharsPerToken:         cfg.CharsPerToken,
+		MaxOutputTokens:       cfg.MaxOutputTokens,
+		TimeoutSeconds:        int(cfg.Timeout.Seconds()),
+		TransportRetries:      cfg.TransportRetries,
+		AutoCalibrate:         cfg.AutoCalibrate,
+		EnhancedAutoTest:      cfg.EnhancedAutoTest,
+		BinaryPrecisionTokens: cfg.BinaryPrecisionTokens,
+		ParallelTests:         cfg.ParallelTests,
+		RequestIntervalMS:     cfg.RequestIntervalMS,
+		AnchorCount:           cfg.AnchorCount,
+		EvidenceTolerance:     cfg.EvidenceTolerance,
+		TestModes:             append([]string(nil), cfg.TestModes...),
+		ReportLanguage:        cfg.ReportLanguage,
+		PreviewAfterRun:       cfg.PreviewAfterRun,
 	}
 	data, _ := json.Marshal(snapshot)
 	digest := sha256.Sum256(data)

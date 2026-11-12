@@ -59,6 +59,7 @@ type Runner struct {
 	requestMu       sync.Mutex
 	nextRequestAt   time.Time
 	logMu           sync.Mutex
+	checkpointMu    sync.Mutex
 	checkpointPath  string
 	configSignature string
 }
@@ -85,6 +86,46 @@ func (runner *Runner) saveCheckpoint(checkpoint Checkpoint) error {
 	}
 	checkpoint.ConfigSignature = runner.configSignature
 	return SaveCheckpoint(runner.checkpointPath, checkpoint)
+}
+
+func trialKey(tier int, label string) string {
+	return fmt.Sprintf("%d|%s", tier, label)
+}
+
+func findTrial(trials []Trial, tier int, label string) (Trial, bool) {
+	key := trialKey(tier, label)
+	for _, trial := range trials {
+		if trialKey(trial.Tier, trial.Label) == key {
+			return trial, true
+		}
+	}
+	return Trial{}, false
+}
+
+func (runner *Runner) resumeTrial(state *Checkpoint, tier int, label string) (Trial, error) {
+	runner.checkpointMu.Lock()
+	if trial, ok := findTrial(state.Trials, tier, label); ok {
+		runner.checkpointMu.Unlock()
+		fmt.Fprintf(runner.Out, "Reusing completed trial %s …\n", label)
+		return trial, nil
+	}
+	runner.checkpointMu.Unlock()
+
+	trial, err := runner.runTrial(tier, label)
+	if err != nil {
+		return Trial{}, err
+	}
+
+	runner.checkpointMu.Lock()
+	defer runner.checkpointMu.Unlock()
+	if existing, ok := findTrial(state.Trials, tier, label); ok {
+		return existing, nil
+	}
+	state.Trials = append(state.Trials, trial)
+	if err := runner.saveCheckpoint(*state); err != nil {
+		return Trial{}, err
+	}
+	return trial, nil
 }
 
 func (runner *Runner) Run() ([]Trial, error) {
@@ -129,11 +170,11 @@ func (runner *Runner) runNormal(checkpoint *Checkpoint) ([]Trial, error) {
 	for index := startIndex; index < len(runner.Config.Tiers); index++ {
 		tier := runner.Config.Tiers[index]
 		fmt.Fprintf(runner.Out, "Testing %s context tier …\n", comma(tier))
-		primary, err := runner.runTrial(tier, "primary")
+		primary, err := runner.resumeTrial(&state, tier, "primary")
 		if err != nil {
 			return trials, err
 		}
-		trials = append(trials, primary)
+		trials = state.Trials
 		runner.applyCalibration(primary)
 
 		if primary.ContextTooLarge {
@@ -149,11 +190,11 @@ func (runner *Runner) runNormal(checkpoint *Checkpoint) ([]Trial, error) {
 			}
 			previous := runner.Config.Tiers[index-1]
 			fmt.Fprintf(runner.Out, "Context limit reached. Confirming %s with a new question set …\n", comma(previous))
-			confirmation, err := runner.runTrial(previous, "confirmation_new_questions")
+			confirmation, err := runner.resumeTrial(&state, previous, "confirmation_new_questions")
 			if err != nil {
 				return trials, err
 			}
-			trials = append(trials, confirmation)
+			trials = state.Trials
 			runner.applyCalibration(confirmation)
 			state.Trials = trials
 			state.Phase = "done"
@@ -232,11 +273,10 @@ func (runner *Runner) runEnhanced(checkpoint *Checkpoint) ([]Trial, error) {
 	for index := state.TierIndex; index < len(runner.Config.Tiers); index++ {
 		tier := runner.Config.Tiers[index]
 		fmt.Fprintf(runner.Out, "Enhanced test: %s context tier, 3 independent question sets …\n", comma(tier))
-		outcome, err := runner.runTier(tier, "primary")
+		outcome, err := runner.runTier(tier, "primary", &state)
 		if err != nil {
 			return state.Trials, err
 		}
-		state.Trials = append(state.Trials, outcome.trials...)
 		runner.applyTrialSetCalibration(tier, outcome.trials)
 		if !outcome.passed {
 			if state.LastPassed == 0 {
@@ -276,11 +316,10 @@ func (runner *Runner) runEnhanced(checkpoint *Checkpoint) ([]Trial, error) {
 func (runner *Runner) runProbe(state *Checkpoint) ([]Trial, error) {
 	for state.ProbeCount < 4 && state.ProbeHigh > state.LastPassed {
 		fmt.Fprintf(runner.Out, "Enhanced probe: %s context tier, 3 independent question sets …\n", comma(state.ProbeHigh))
-		outcome, err := runner.runTier(state.ProbeHigh, fmt.Sprintf("probe_%d_%d", state.ProbeHigh, state.ProbeCount+1))
+		outcome, err := runner.runTier(state.ProbeHigh, fmt.Sprintf("probe_%d_%d", state.ProbeHigh, state.ProbeCount+1), state)
 		if err != nil {
 			return state.Trials, err
 		}
-		state.Trials = append(state.Trials, outcome.trials...)
 		runner.applyTrialSetCalibration(state.ProbeHigh, outcome.trials)
 		if !outcome.passed {
 			state.Phase = "binary"
@@ -308,7 +347,10 @@ func (runner *Runner) runProbe(state *Checkpoint) ([]Trial, error) {
 }
 
 func (runner *Runner) runBinarySearch(state *Checkpoint) ([]Trial, error) {
-	const precision = 1000
+	precision := runner.Config.BinaryPrecisionTokens
+	if precision <= 0 {
+		precision = 10000
+	}
 	fmt.Fprintf(runner.Out, "Binary search between %s and %s tokens (precision %d) …\n", comma(state.BinaryLow), comma(state.BinaryHigh), precision)
 	for state.BinaryHigh-state.BinaryLow > precision {
 		mid := ((state.BinaryLow + state.BinaryHigh) / 2 / precision) * precision
@@ -316,11 +358,10 @@ func (runner *Runner) runBinarySearch(state *Checkpoint) ([]Trial, error) {
 			break
 		}
 		fmt.Fprintf(runner.Out, "Binary candidate: %s context tier, 3 independent question sets …\n", comma(mid))
-		outcome, err := runner.runTier(mid, fmt.Sprintf("binary_%d_%d", state.BinaryLow, state.BinaryHigh))
+		outcome, err := runner.runTier(mid, fmt.Sprintf("binary_%d_%d", state.BinaryLow, state.BinaryHigh), state)
 		if err != nil {
 			return state.Trials, err
 		}
-		state.Trials = append(state.Trials, outcome.trials...)
 		runner.applyTrialSetCalibration(mid, outcome.trials)
 		if outcome.passed {
 			state.BinaryLow = mid
@@ -340,14 +381,14 @@ func (runner *Runner) runBinarySearch(state *Checkpoint) ([]Trial, error) {
 	return state.Trials, nil
 }
 
-func (runner *Runner) runTier(tier int, label string) (tierOutcome, error) {
+func (runner *Runner) runTier(tier int, label string, state *Checkpoint) (tierOutcome, error) {
 	if runner.Config.ParallelTests {
-		return runner.runTierParallel(tier, label)
+		return runner.runTierParallel(tier, label, state)
 	}
 	outcome := tierOutcome{passed: true}
 	for repetition := 1; repetition <= 3; repetition++ {
 		trialLabel := fmt.Sprintf("%s_%d", label, repetition)
-		trial, err := runner.runTrial(tier, trialLabel)
+		trial, err := runner.resumeTrial(state, tier, trialLabel)
 		if err != nil {
 			return outcome, err
 		}
@@ -362,7 +403,7 @@ func (runner *Runner) runTier(tier int, label string) (tierOutcome, error) {
 	return outcome, nil
 }
 
-func (runner *Runner) runTierParallel(tier int, label string) (tierOutcome, error) {
+func (runner *Runner) runTierParallel(tier int, label string, state *Checkpoint) (tierOutcome, error) {
 	outcome := tierOutcome{passed: true}
 	trials := make([]Trial, 3)
 	errors := make([]error, 3)
@@ -371,7 +412,7 @@ func (runner *Runner) runTierParallel(tier int, label string) (tierOutcome, erro
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
-			trial, err := runner.runTrial(tier, fmt.Sprintf("%s_%d", label, index+1))
+			trial, err := runner.resumeTrial(state, tier, fmt.Sprintf("%s_%d", label, index+1))
 			trials[index] = trial
 			errors[index] = err
 		}(index)
@@ -442,6 +483,7 @@ func (runner *Runner) runTrial(tier int, label string) (Trial, error) {
 			result.Raw["_max_output_tokens"] = outputLimit
 			result.Raw["_retryable"] = result.Retryable
 			result.Raw["_retry_after_ms"] = result.RetryAfter.Milliseconds()
+			result.Raw["_retry_class"] = result.RetryClass
 			result.Raw["_structured_output"] = result.StructuredOutput
 			result.Raw["_structured_output_fallback"] = result.StructuredOutputFallback
 			suffix := ""
@@ -471,8 +513,8 @@ func (runner *Runner) runTrial(tier int, label string) (Trial, error) {
 		if !result.Retryable || attempts >= runner.Config.TransportRetries+1 {
 			break
 		}
-		delay := retryDelay(attempts, result.RetryAfter)
-		fmt.Fprintf(runner.Out, "Retrying after %s (attempt %d/%d) …\n", delay, attempts+1, runner.Config.TransportRetries+1)
+		delay := retryDelay(attempts, result)
+		fmt.Fprintf(runner.Out, "Retrying %s after %s (attempt %d/%d) …\n", result.RetryClass, delay, attempts+1, runner.Config.TransportRetries+1)
 		time.Sleep(delay)
 	}
 
@@ -569,14 +611,21 @@ func CalibrateFromTrials(tier int, chars float64, trials []Trial) *Calibration {
 	return Calibrate(tier, chars, &median)
 }
 
-func retryDelay(attempt int, retryAfter time.Duration) time.Duration {
-	const base = 500 * time.Millisecond
-	const maximum = 30 * time.Second
-	if retryAfter > 0 {
-		if retryAfter > maximum {
+func retryDelay(attempt int, result provider.Result) time.Duration {
+	base := 500 * time.Millisecond
+	maximum := 30 * time.Second
+	switch result.RetryClass {
+	case "model_cooldown":
+		base = 15 * time.Second
+		maximum = 5 * time.Minute
+	case "rate_limit", "server_error", "timeout":
+		base = time.Second
+	}
+	if result.RetryAfter > 0 {
+		if result.RetryAfter > maximum {
 			return maximum
 		}
-		return retryAfter
+		return result.RetryAfter
 	}
 	delay := base
 	for index := 1; index < attempt && delay < maximum; index++ {

@@ -25,6 +25,7 @@ type Result struct {
 	TransportError           string
 	Retryable                bool
 	RetryAfter               time.Duration
+	RetryClass               string
 	StructuredOutput         bool
 	StructuredOutputFallback bool
 }
@@ -38,23 +39,23 @@ func sendWithStructuredOutput(cfg config.Config, userInput string, structured bo
 	endpoint, payload := buildPayload(cfg, userInput, structured)
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return Result{Raw: map[string]any{"transport_error": "MarshalError", "error": err.Error()}, TransportError: "MarshalError"}
+		return Result{Raw: map[string]any{"transport_error": "MarshalError", "error": err.Error()}, TransportError: "MarshalError", RetryClass: "marshal_error"}
 	}
 	request, err := http.NewRequest(http.MethodPost, cfg.BaseURL+endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Result{Raw: map[string]any{"transport_error": "RequestError", "error": err.Error()}, TransportError: "RequestError"}
+		return Result{Raw: map[string]any{"transport_error": "RequestError", "error": err.Error()}, TransportError: "RequestError", RetryClass: "request_error"}
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	request.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: cfg.Timeout}
 	httpResult, err := client.Do(request)
 	if err != nil {
-		return Result{Raw: map[string]any{"transport_error": "TransportError", "error": err.Error()}, TransportError: "TransportError", Retryable: true}
+		return Result{Raw: map[string]any{"transport_error": "TransportError", "error": err.Error()}, TransportError: "TransportError", Retryable: true, RetryClass: "transport"}
 	}
 	defer httpResult.Body.Close()
 	data, err := io.ReadAll(httpResult.Body)
 	if err != nil {
-		return Result{Raw: map[string]any{"transport_error": "ReadError", "error": err.Error()}, TransportError: "ReadError", Retryable: true}
+		return Result{Raw: map[string]any{"transport_error": "ReadError", "error": err.Error()}, TransportError: "ReadError", Retryable: true, RetryClass: "transport"}
 	}
 	if httpResult.StatusCode >= 400 {
 		body := string(data)
@@ -75,7 +76,7 @@ func sendWithStructuredOutput(cfg config.Config, userInput string, structured bo
 	}
 	raw := map[string]any{}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return Result{Raw: map[string]any{"transport_error": "DecodeError", "error": err.Error()}, TransportError: "DecodeError"}
+		return Result{Raw: map[string]any{"transport_error": "DecodeError", "error": err.Error()}, TransportError: "DecodeError", RetryClass: "decode_error"}
 	}
 	return Result{Raw: raw, Text: responseText(raw), HTTPStatus: httpResult.StatusCode, StructuredOutput: structured}
 }
@@ -221,12 +222,43 @@ func isRetryableStatus(status int) bool {
 }
 
 func httpErrorResult(status int, body, retryAfter string) Result {
+	retryClass, retryable := classifyHTTPError(status, body)
 	return Result{
 		Raw:        map[string]any{"http_status": status, "error": body},
 		HTTPStatus: status,
-		Retryable:  isRetryableStatus(status),
+		Retryable:  retryable,
 		RetryAfter: parseRetryAfter(retryAfter),
+		RetryClass: retryClass,
 	}
+}
+
+func classifyHTTPError(status int, body string) (string, bool) {
+	detail := strings.ToLower(body)
+	if status == http.StatusTooManyRequests {
+		if strings.Contains(detail, "model_cooldown") || strings.Contains(detail, "cooling down") {
+			return "model_cooldown", true
+		}
+		if strings.Contains(detail, "usage_limit") || strings.Contains(detail, "usage limit") {
+			return "usage_limit", false
+		}
+		return "rate_limit", true
+	}
+	if status == http.StatusRequestTimeout {
+		return "timeout", true
+	}
+	if status >= 500 && status <= 599 && status != http.StatusNotImplemented {
+		return "server_error", true
+	}
+	if strings.Contains(detail, "context_too_large") || strings.Contains(detail, "exceeds the context window") {
+		return "context_too_large", false
+	}
+	if strings.Contains(detail, "invalid api key") || strings.Contains(detail, "authentication") || strings.Contains(detail, "unauthorized") {
+		return "authentication_error", false
+	}
+	if strings.Contains(detail, "invalid request") || strings.Contains(detail, "invalid_parameter") {
+		return "invalid_request_error", false
+	}
+	return fmt.Sprintf("http_%d", status), isRetryableStatus(status)
 }
 
 func parseRetryAfter(value string) time.Duration {
